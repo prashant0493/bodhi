@@ -20,6 +20,8 @@ import fedmsg
 import fedmsg.config
 import fedmsg.encoding
 
+import socket
+
 import bodhi.server
 import bodhi.server.config
 
@@ -37,6 +39,9 @@ def init(active=None, cert_prefix=None):
         fedmsg_config['name'] = 'relay_inbound'
     if cert_prefix is not None:
         fedmsg_config['cert_prefix'] = cert_prefix
+
+    hostname = socket.gethostname().split('.', 1)[0]
+    fedmsg_config['name'] = 'bodhi.%s' % hostname
 
     fedmsg.init(**fedmsg_config)
     bodhi.server.log.info("fedmsg initialized")
