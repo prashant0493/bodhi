@@ -16,7 +16,7 @@ import setuptools.command.egg_info
 
 here = os.path.abspath(os.path.dirname(__file__))
 README = open(os.path.join(here, 'README.rst')).read()
-VERSION = '2.3.2'
+VERSION = '2.3.3'
 # Possible options are at https://pypi.python.org/pypi?%3Aaction=list_classifiers
 CLASSIFIERS = [
     'Development Status :: 5 - Production/Stable',
@@ -41,7 +41,7 @@ server_requires = [
     'pyramid_tm',
     'waitress',
     'colander',
-    'cornice',
+    'cornice<2',
 
     'python-openid',
     'pyramid_fas_openid',

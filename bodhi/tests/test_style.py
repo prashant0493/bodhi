@@ -35,14 +35,14 @@ class TestStyle(unittest.TestCase):
         goal is that this test would one day check the entire codebase.
         """
         enforced_paths = [
-            'bodhi/server/models', 'bodhi/server/scripts', 'bodhi/server/services/comments.py',
-            'bodhi/server/services/releases.py', 'bodhi/server/services/overrides.py',
-            'bodhi/server/services/updates.py', 'bodhi/server/views/admin.py']
+            'bodhi/server/consumers',
+            'bodhi/server/models', 'bodhi/server/scripts', 'bodhi/server/services',
+            'bodhi/server/views']
 
         enforced_paths = [os.path.join(REPO_PATH, p) for p in enforced_paths]
 
         # We ignore E712, which disallows non-identity comparisons with True and False
-        flake8_command = ['/usr/bin/flake8', '--max-line-length', '100', '--ignore=E712']
+        flake8_command = ['flake8', '--max-line-length', '100', '--ignore=E712']
         flake8_command.extend(enforced_paths)
 
         self.assertEqual(subprocess.call(flake8_command), 0)

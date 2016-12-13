@@ -34,9 +34,89 @@ from bodhi.server.models import (Package, Update, Build, Base,
         UpdateRequest, UpdateStatus, UpdateType)
 from bodhi.server.buildsys import get_session, DevBuildsys
 from bodhi.server.metadata import ExtendedMetadata
+from bodhi.tests.server import base
 from bodhi.tests.server.functional.base import DB_PATH
 
 from bodhi.tests.server import populate
+
+
+class TestAddUpdate(base.BaseTestCase):
+    """
+    This class contains tests for the ExtendedMetadata.add_update() method.
+    """
+    def setUp(self):
+        """
+        Initialize our temporary repo.
+        """
+        super(TestAddUpdate, self).setUp()
+        self.tempdir = tempfile.mkdtemp('bodhi')
+        self.temprepo = join(self.tempdir, 'f17-updates-testing')
+        mkmetadatadir(join(self.temprepo, 'f17-updates-testing', 'i386'))
+
+    def tearDown(self):
+        """
+        Clean up the tempdir.
+        """
+        super(TestAddUpdate, self).tearDown()
+        shutil.rmtree(self.tempdir)
+
+    def test_build_not_in_builds(self):
+        """
+        Test correct behavior when a build in update.builds isn't found in self.builds() and
+        koji.getBuild() is called instead.
+        """
+        update = self.db.query(Update).one()
+        md = ExtendedMetadata(update.release, update.request, self.db, self.temprepo)
+
+        md.add_update(update)
+
+        self.assertEqual(len(md.uinfo.updates), 1)
+        self.assertEquals(md.uinfo.updates[0].title, update.title)
+        self.assertEquals(md.uinfo.updates[0].release, update.release.long_name)
+        self.assertEquals(md.uinfo.updates[0].status, update.status.value)
+        self.assertEquals(md.uinfo.updates[0].updated_date, update.date_modified)
+        self.assertEquals(md.uinfo.updates[0].fromstr, config.get('bodhi_email'))
+        self.assertEquals(md.uinfo.updates[0].rights, config.get('updateinfo_rights'))
+        self.assertEquals(md.uinfo.updates[0].description, update.notes)
+        self.assertEquals(md.uinfo.updates[0].id, update.alias)
+        self.assertEqual(len(md.uinfo.updates[0].references), 2)
+        bug = md.uinfo.updates[0].references[0]
+        self.assertEquals(bug.href, update.bugs[0].url)
+        self.assertEquals(bug.id, '12345')
+        self.assertEquals(bug.type, 'bugzilla')
+        cve = md.uinfo.updates[0].references[1]
+        self.assertEquals(cve.type, 'cve')
+        self.assertEquals(cve.href, update.cves[0].url)
+        self.assertEquals(cve.id, update.cves[0].cve_id)
+        self.assertEqual(len(md.uinfo.updates[0].collections), 1)
+        col = md.uinfo.updates[0].collections[0]
+        self.assertEquals(col.name, update.release.long_name)
+        self.assertEquals(col.shortname, update.release.name)
+        self.assertEqual(len(col.packages), 2)
+        pkg = col.packages[0]
+        self.assertEquals(pkg.epoch, '0')
+        # It's a little goofy, but the DevBuildsys is going to return TurboGears rpms when its
+        # listBuildRPMs() method is called, so let's just roll with it.
+        self.assertEquals(pkg.name, 'TurboGears')
+        self.assertEquals(
+            pkg.src,
+            ('https://download.fedoraproject.org/pub/fedora/linux/updates/17/SRPMS/T/'
+             'TurboGears-1.0.2.2-2.fc7.src.rpm'))
+        self.assertEquals(pkg.version, '1.0.2.2')
+        self.assertFalse(pkg.reboot_suggested)
+        self.assertEquals(pkg.arch, 'src')
+        self.assertEquals(pkg.filename, 'TurboGears-1.0.2.2-2.fc7.src.rpm')
+        pkg = col.packages[1]
+        self.assertEquals(pkg.epoch, '0')
+        self.assertEquals(pkg.name, 'TurboGears')
+        self.assertEquals(
+            pkg.src,
+            ('https://download.fedoraproject.org/pub/fedora/linux/updates/17/i386/T/'
+             'TurboGears-1.0.2.2-2.fc7.noarch.rpm'))
+        self.assertEquals(pkg.version, '1.0.2.2')
+        self.assertFalse(pkg.reboot_suggested)
+        self.assertEquals(pkg.arch, 'noarch')
+        self.assertEquals(pkg.filename, 'TurboGears-1.0.2.2-2.fc7.noarch.rpm')
 
 
 class TestExtendedMetadata(unittest.TestCase):
@@ -96,6 +176,50 @@ class TestExtendedMetadata(unittest.TestCase):
         for record in uinfo.updates:
             if record.title == title:
                 return record
+
+    def test___init___checks_existence_if_repomd_xml(self):
+        """
+        The __init__() method has a test for finding cached repodata. It used to check for the
+        existence of a repodata folder, but this caused crashes sometimes because due to an unsolved
+        bug[0] this directory sometimes does not contain a repomd.xml file. This test ensures that
+        the existence of the repomd.xml file itself is tested to decide if it can load a cache.
+
+        [0] https://github.com/fedora-infra/bodhi/issues/887
+        """
+        update = self.db.query(Update).one()
+        # Pretend it's pushed to testing
+        update.status = UpdateStatus.testing
+        update.request = None
+        update.date_pushed = datetime.utcnow()
+        DevBuildsys.__tagged__[update.title] = ['f17-updates-testing']
+        # Generate the XML
+        md = ExtendedMetadata(update.release, update.request, self.db, self.temprepo)
+        # Insert the updateinfo.xml into the repository
+        md.insert_updateinfo()
+        md.cache_repodata()
+        updateinfo = self._verify_updateinfo(self.repodata)
+        # Change the notes on the update, but not the date_modified. Since this test deletes
+        # repomd.xml the cached notes should be ignored and we should see this 'x' in the notes.
+        # We can test for this to ensure that the cache was not used.
+        update.notes = u'x'
+        # Re-initialize our temporary repo
+        shutil.rmtree(self.temprepo)
+        os.mkdir(self.temprepo)
+        mkmetadatadir(join(self.temprepo, 'f17-updates-testing', 'i386'))
+        # Simulate the repomd.xml file missing. This should cause new updateinfo to be generated
+        # instead of it trying to load from the cache.
+        os.remove(
+            join(self.temprepo, '..', 'f17-updates-testing.repocache', 'repodata', 'repomd.xml'))
+
+        md = ExtendedMetadata(update.release, update.request, self.db, self.temprepo)
+
+        md.insert_updateinfo()
+        updateinfo = self._verify_updateinfo(self.repodata)
+        # Read and verify the updateinfo.xml.gz
+        uinfo = createrepo_c.UpdateInfo(updateinfo)
+        notice = self.get_notice(uinfo, update.title)
+        # Since 'x' made it into the xml, we know it didn't use the cache.
+        self.assertEquals(notice.description, u'x')  # not u'Useful details!'
 
     def test_extended_metadata(self):
         update = self.db.query(Update).one()

@@ -84,12 +84,13 @@ class DevBuildsys(Buildsystem):
     __tagged__ = {}
     __rpms__ = []
 
-    def clear(self):
-        DevBuildsys.__untag__ = []
-        DevBuildsys.__moved__ = []
-        DevBuildsys.__added__ = []
-        DevBuildsys.__tagged__ = {}
-        DevBuildsys.__rpms__ = []
+    @classmethod
+    def clear(cls):
+        cls.__untag__ = []
+        cls.__moved__ = []
+        cls.__added__ = []
+        cls.__tagged__ = {}
+        cls.__rpms__ = []
 
     def multiCall(self):
         return []
@@ -291,19 +292,24 @@ class DevBuildsys(Buildsystem):
 def koji_login(config):
     """ Login to Koji and return the session """
     koji_client = koji.ClientSession(_koji_hub, {})
-    if not koji_client.ssl_login(*get_certs(config)):
-        log.error('Koji ssl_login failed')
+    if not koji_client.krb_login(**get_krb_conf(config)):
+        log.error('Koji krb_login failed')
     return koji_client
 
 
-def get_certs(config):
-    """ Return paths to the local certs needed log into koji """
-    client = config.get('client_cert', join(expanduser('~'), '.fedora.cert'))
-    clientca = config.get('clientca_cert', join(expanduser('~'),
-                          '.fedora-upload-ca.cert'))
-    serverca = config.get('serverca_cert', join(expanduser('~'),
-                          '.fedora-server-ca.cert'))
-    return client, clientca, serverca
+def get_krb_conf(config):
+    """ Return arguments for krb_login. """
+    principal = config.get('krb_principal')
+    keytab = config.get('krb_keytab')
+    ccache = config.get('krb_ccache')
+    args = {}
+    if principal:
+        args['principal'] = principal
+    if keytab:
+        args['keytab'] = keytab
+    if ccache:
+        args['ccache'] = ccache
+    return args
 
 
 def get_session():

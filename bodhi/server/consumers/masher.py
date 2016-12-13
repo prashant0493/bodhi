@@ -19,30 +19,30 @@ comprised of a fedmsg consumer that launches threads for each repository being
 mashed.
 """
 
-import os
 import copy
 import functools
+import hashlib
 import json
+import os
+import threading
 import time
 import urllib2
-import hashlib
-import threading
-import fedmsg.consumers
+from collections import defaultdict
 from datetime import datetime
 
-from collections import defaultdict
 from fedmsg_atomic_composer.composer import AtomicComposer
 from fedmsg_atomic_composer.config import config as atomic_config
 from pyramid.paster import get_appsettings
 from sqlalchemy import engine_from_config
+import fedmsg.consumers
 
 from bodhi.server import log, buildsys, notifications, mail, util
-from bodhi.server.util import sorted_updates, sanity_check_repodata, transactional_session_maker
 from bodhi.server.config import config
-from bodhi.server.models import (Update, UpdateRequest, UpdateType, Release,
-                          UpdateStatus, ReleaseState, Base)
-from bodhi.server.metadata import ExtendedMetadata
 from bodhi.server.exceptions import BodhiException
+from bodhi.server.metadata import ExtendedMetadata
+from bodhi.server.models import (Update, UpdateRequest, UpdateType, Release,
+                                 UpdateStatus, ReleaseState, Base)
+from bodhi.server.util import sorted_updates, sanity_check_repodata, transactional_session_maker
 
 
 def checkpoint(method):
@@ -266,19 +266,8 @@ class MasherThread(threading.Thread):
         yield "  name:  %(name)-20s  success:  %(success)s" % dict(
             zip(attrs, [getattr(self, attr, 'Undefined') for attr in attrs])
         )
-        ## If we wanted to include more info in the summary at the end, we
-        ## could do this.. but I bet it would be so spammy that it would ruin
-        ## the effect of a summary.  It would scroll longer than one page, and
-        ## you wouldn't be able to see the success/failure status of all the
-        ## different threads all in one glance.
-        #for tag, nvr in self.add_tags:
-        #    yield "    added tag %(tag)s to %(nvr)s" % dict(tag=tag, nvr=nvr)
-        #for src, dest, nvr in self.add_tags:
-        #    yield "    moved %(nvr)s from %(src)s to %(nvr)s" % dict(
-        #        src=src, dest=dest, nvr=nvr)
 
     def work(self):
-        self.koji = buildsys.get_session()
         self.release = self.db.query(Release)\
                               .filter_by(name=self.release).one()
         self.id = getattr(self.release, '%s_tag' % self.request.value)
@@ -454,13 +443,13 @@ class MasherThread(threading.Thread):
         # Remove the pending tag as well
         if update.request is UpdateRequest.stable:
             update.remove_tag(update.release.pending_stable_tag,
-                              koji=self.koji)
+                              koji=buildsys.get_session())
         elif update.request is UpdateRequest.testing:
             update.remove_tag(update.release.pending_testing_tag,
-                              koji=self.koji)
+                              koji=buildsys.get_session())
         update.request = None
-        if update in self.state['updates']:
-            self.state['updates'].remove(update)
+        if update.title in self.state['updates']:
+            self.state['updates'].remove(update.title)
         if update in self.updates:
             self.updates.remove(update)
         notifications.publish(
@@ -584,27 +573,28 @@ class MasherThread(threading.Thread):
                         self.move_tags_async.extend(move_tags)
 
     def _perform_tag_actions(self):
+        koji = buildsys.get_session()
         for i, batches in enumerate([(self.add_tags_sync, self.move_tags_sync),
                                      (self.add_tags_async, self.move_tags_async)]):
             add, move = batches
             if i == 0:
-                self.koji.multicall = False
+                koji.multicall = False
             else:
-                self.koji.multicall = True
+                koji.multicall = True
             for action in add:
                 tag, build = action
                 self.log.info("Adding tag %s to %s" % (tag, build))
-                self.koji.tagBuild(tag, build, force=True)
+                koji.tagBuild(tag, build, force=True)
             for action in move:
                 from_tag, to_tag, build = action
                 self.log.info('Moving %s from %s to %s' % (
                               build, from_tag, to_tag))
-                self.koji.moveBuild(from_tag, to_tag, build, force=True)
+                koji.moveBuild(from_tag, to_tag, build, force=True)
 
             if i != 0:
-                results = self.koji.multiCall()
+                results = koji.multiCall()
                 failed_tasks = buildsys.wait_for_tasks([task[0] for task in results],
-                                                       self.koji, sleep=15)
+                                                       koji, sleep=15)
                 if failed_tasks:
                     raise Exception("Failed to move builds: %s" % failed_tasks)
 
@@ -622,15 +612,16 @@ class MasherThread(threading.Thread):
     def remove_pending_tags(self):
         """ Remove all pending tags from these updates """
         self.log.debug("Removing pending tags from builds")
-        self.koji.multicall = True
+        koji = buildsys.get_session()
+        koji.multicall = True
         for update in self.updates:
             if update.request is UpdateRequest.stable:
                 update.remove_tag(update.release.pending_stable_tag,
-                                  koji=self.koji)
+                                  koji=koji)
             elif update.request is UpdateRequest.testing:
                 update.remove_tag(update.release.pending_testing_tag,
-                                  koji=self.koji)
-        result = self.koji.multiCall()
+                                  koji=koji)
+        result = koji.multiCall()
         self.log.debug('remove_pending_tags koji.multiCall result = %r',
                        result)
 
@@ -886,10 +877,10 @@ class MasherThread(threading.Thread):
     def get_security_updates(self, release):
         release = self.db.query(Release).filter_by(long_name=release).one()
         updates = self.db.query(Update).filter(
-                Update.type == UpdateType.security,
-                Update.status == UpdateStatus.testing,
-                Update.release == release,
-                Update.request == None
+            Update.type == UpdateType.security,
+            Update.status == UpdateStatus.testing,
+            Update.release == release,
+            Update.request.is_(None)
         ).all()
         updates = self.sort_by_days_in_testing(updates)
         return updates
@@ -930,8 +921,8 @@ class MasherThread(threading.Thread):
                 updates_tag = tag.replace('-testing', '')
                 if updates_tag in mashed_repos:
                     release['repos']['updates'] = 'file://' + os.path.join(
-                            mashed_repos[updates_tag], updates_tag,
-                            release['arch'])
+                        mashed_repos[updates_tag], updates_tag,
+                        release['arch'])
                 log.debug('Using the updates repo from %s',
                           release['repos']['updates'])
             else:
@@ -980,7 +971,7 @@ class MashThread(threading.Thread):
         self.log.info('Mashing %s', self.tag)
         out, err, returncode = util.cmd(self.mash_cmd)
         self.log.info('Took %s seconds to mash %s', time.time() - start,
-                 self.tag)
+                      self.tag)
         if returncode != 0:
             self.log.error('There was a problem running mash (%d)' % returncode)
             self.log.error(out)
